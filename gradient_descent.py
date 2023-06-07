@@ -2,6 +2,7 @@ from firedrake import *
 from pyroteus import recover_hessian, hessian_metric
 from firedrake.meshadapt import adapt, RiemannianMetric
 from firedrake_adjoint import *
+from movement import MongeAmpereMover
 import numpy as np
 import time
 
@@ -49,6 +50,25 @@ def adapt_mesh(mesh, u, q, target_complexity):
     return mesh
 
 
+f = File('movement.pvd')
+def move_mesh(mesh, u, q):
+    ele = u.function_space().ufl_element()
+    def monitor(mesh):
+        V = FunctionSpace(mesh, ele)
+        gu = Function(V, name='gradient')
+        m = Function(V, name='monitor')
+        gu.project(dot(grad(u), grad(u)))
+        m.project(inner(grad(gu), grad(gu)))
+        mmean = m.dat.data[:].mean()
+        m.dat.data[:] = np.maximum(np.minimum(m.dat.data[:], mmean*5), mmean/2)
+        mmax = m.dat.data[:].max()
+        m.dat.data[:] /= mmax
+        f.write(m)
+        return m
+    mover = MongeAmpereMover(mesh, monitor, method='quasi_newton')
+    mover.move()
+    return mover.mesh
+
 class DefaultParams:
     max_adapts = 100
     iterations_per_adapt = 5
@@ -56,6 +76,7 @@ class DefaultParams:
     max_complexity = 20000
     initial_learning_rate = 1e-8
     target_increase_factor = 1.5
+    move_mesh = False
 
 
 def minimize_gs(run_model, mesh0, ele, params, bounds=None):
@@ -82,6 +103,7 @@ def minimize_gs(run_model, mesh0, ele, params, bounds=None):
         for j in range(p.iterations_per_adapt):
             tape = get_working_tape()
             tape.clear_tape()
+            mesh.create_block_variable()
             c = Control(q)
             J, u = run_model(q, initial_guess=u)
             rf = ReducedFunctional(J, c)
@@ -105,7 +127,10 @@ def minimize_gs(run_model, mesh0, ele, params, bounds=None):
 
         with stop_annotating():
             print("ADAPTING THE MESH:")
-            mesh = adapt_mesh(mesh, u, q, p.target_complexity)
+            if move_mesh:
+                mesh = move_mesh(mesh, u, q)
+            else:
+                mesh = adapt_mesh(mesh, u, q, target_complexity)
             p.target_complexity *= p.target_increase_factor
             if p.target_complexity > p.max_complexity:
                 print("Maximum complexity reached")

@@ -32,7 +32,7 @@ def run_model(control, initial_guess=None):
             + u * v * dx
             - (f + q)*v*dx
             )
-    bc = DirichletBC(V, 0, [1, 2])
+    bc = DirichletBC(V, 0, [i+1 for i in range(8)])
 
     q.assign(beta*control)
 
