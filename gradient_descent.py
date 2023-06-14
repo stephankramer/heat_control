@@ -72,18 +72,21 @@ def move_mesh(mesh, u, q):
 class DefaultParams:
     max_adapts = 100
     iterations_per_adapt = 5
-    target_complexity = 200
+    initial_target_complexity = 200
     max_complexity = 20000
     initial_learning_rate = 1e-8
     target_increase_factor = 1.5
     move_mesh = False
 
 
-def minimize_gs(run_model, mesh0, ele, params, bounds=None):
+def minimize_gs(run_model, mesh0, ele, params=None, bounds=None):
 
     p = DefaultParams()
-    for key, value in params.items():
-        setattr(p, key, value)
+    if params:
+        for key, value in params.items():
+            setattr(p, key, value)
+    target_complexity = p.initial_target_complexity
+
 
     mesh = mesh0
     logf = open('log.txt', 'w')
@@ -127,12 +130,12 @@ def minimize_gs(run_model, mesh0, ele, params, bounds=None):
 
         with stop_annotating():
             print("ADAPTING THE MESH:")
-            if move_mesh:
+            if p.move_mesh:
                 mesh = move_mesh(mesh, u, q)
             else:
                 mesh = adapt_mesh(mesh, u, q, target_complexity)
-            p.target_complexity *= p.target_increase_factor
-            if p.target_complexity > p.max_complexity:
+            target_complexity *= p.target_increase_factor
+            if target_complexity > p.max_complexity:
                 print("Maximum complexity reached")
                 break
 
