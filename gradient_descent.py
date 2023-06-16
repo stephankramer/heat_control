@@ -1,6 +1,7 @@
 from firedrake import *
-from pyroteus import recover_hessian, hessian_metric
+from pyroteus import recover_hessian
 from firedrake.meshadapt import adapt, RiemannianMetric
+from firedrake.functionspaceimpl import WithGeometry
 from firedrake_adjoint import *
 from movement import MongeAmpereMover
 import numpy as np
@@ -30,8 +31,8 @@ def interpolate_to_new_function_space(source, V):
 
 
 def adapt_mesh(mesh, u, q, target_complexity):
-    H = recover_hessian(u, method='L2')
-    metric = RiemannianMetric(hessian_metric(H))
+    TV = TensorFunctionSpace(mesh, "CG", 1)
+    metric = RiemannianMetric(TV).compute_hessian(u)
     metric.rename("metric")
     import numpy as np
     metric.set_parameters(
@@ -50,24 +51,53 @@ def adapt_mesh(mesh, u, q, target_complexity):
     return mesh
 
 
-f = File('movement.pvd')
-def move_mesh(mesh, u, q):
-    ele = u.function_space().ufl_element()
-    def monitor(mesh):
-        V = FunctionSpace(mesh, ele)
-        gu = Function(V, name='gradient')
-        m = Function(V, name='monitor')
-        gu.project(dot(grad(u), grad(u)))
-        m.project(inner(grad(gu), grad(gu)))
-        mmean = m.dat.data[:].mean()
-        m.dat.data[:] = np.maximum(np.minimum(m.dat.data[:], mmean*5), mmean/2)
-        mmax = m.dat.data[:].max()
-        m.dat.data[:] /= mmax
-        f.write(m)
-        return m
-    mover = MongeAmpereMover(mesh, monitor, method='quasi_newton')
-    mover.move()
-    return mover.mesh
+class PersistentMeshMover:
+    def __init__(self, mesh0, **kwargs):
+        self.origx = mesh0.coordinates
+
+        if kwargs.get('debug_files', False):
+            self.debug_file = File('movement.pvd')
+            self.index = 0
+        else:
+            self.debug_file = None
+
+        self.phi = None
+        self.sigma = None
+
+    def move(self, mesh, u, q):
+        # NOTE: currently only adapting to solution u, not to control
+        ele = u.function_space().ufl_element()
+        TV = TensorFunctionSpace(mesh, "CG", 1)
+        H = RiemannianMetric(TV).compute_hessian(u)
+        V = FunctionSpace(mesh, "CG", 1)
+        Hnorm = interpolate(sqrt(inner(H, H)), V)
+
+        mesh_new = Mesh(Function(self.origx))
+        Vnew = FunctionSpace(mesh_new, ele)
+        P0new = FunctionSpace(mesh_new, "DG", 0)
+        m = Function(Vnew, name='monitor')
+
+        def monitor(mesh):
+            m.project(Hnorm)
+            mmax = m.dat.data[:].max()
+            m.dat.data[:] /= mmax
+            m.dat.data[:] = np.maximum(m.dat.data[:], 0.1)
+            if self.debug_file:
+                self.debug_file.write(m)
+                areas = interpolate(CellVolume(mesh), P0new).dat.data[:]
+                print("RATIO = ", self.index, areas.max()/areas.min())
+                self.index += 1
+            return m
+
+        mover = MongeAmpereMover(mesh_new, monitor, method='quasi_newton')
+        if self.phi:
+            phinew = Function(WithGeometry.create(f.function_space(), mesh), val=phi.topological)
+            sigmanew = Function(WithGeometry.create(f.function_space(), mesh), val=sigma.topological)
+            mover.apply_initial_guess(phi_init=phinew, sigma_init=sigmanew)
+
+        mover.move()
+        return mover.mesh
+
 
 class DefaultParams:
     max_adapts = 100
@@ -77,6 +107,7 @@ class DefaultParams:
     initial_learning_rate = 1e-8
     target_increase_factor = 1.5
     move_mesh = False
+    debug_movement_files = False
 
 
 def minimize_gs(run_model, mesh0, ele, params=None, bounds=None):
@@ -85,8 +116,11 @@ def minimize_gs(run_model, mesh0, ele, params=None, bounds=None):
     if params:
         for key, value in params.items():
             setattr(p, key, value)
-    target_complexity = p.initial_target_complexity
+    if p.move_mesh:
+        mover = PersistentMeshMover(mesh0,
+                                    debug_files=p.debug_movement_files)
 
+    target_complexity = p.initial_target_complexity
 
     mesh = mesh0
     logf = open('log.txt', 'w')
@@ -131,7 +165,7 @@ def minimize_gs(run_model, mesh0, ele, params=None, bounds=None):
         with stop_annotating():
             print("ADAPTING THE MESH:")
             if p.move_mesh:
-                mesh = move_mesh(mesh, u, q)
+                mesh = mover.move(mesh, u, q)
             else:
                 mesh = adapt_mesh(mesh, u, q, target_complexity)
             target_complexity *= p.target_increase_factor
